@@ -53,21 +53,26 @@ class AttentionMLP_CUDA(Function):
         ctx.bias_shape = bias.shape
 
         # Call the CUDA kernel for the forward pass
-        output = attention_mlp.attention_mlp_forward_cuda(Q, K, bias)
+        output = attention_mlp.attention_mlp_forward_cuda(
+            Q.contiguous(), 
+            K.contiguous(), 
+            bias.contiguous()
+        )
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
-        # Placeholder for backward pass implementation
         # Retrieve saved tensors
         Q, K, bias = ctx.saved_tensors
-        bias_shape = ctx.bias_shape
 
-        # Allocate gradient tensors
-        grad_Q = torch.zeros_like(Q)
-        grad_K = torch.zeros_like(K)
-        grad_bias = torch.zeros(bias_shape, dtype=bias.dtype, device=bias.device)
+        # Call the CUDA kernel for the backward pass
+        grad_Q, grad_K, grad_bias = attention_mlp.attention_mlp_backward_cuda(
+            Q.contiguous(), 
+            K.contiguous(), 
+            bias.contiguous(), 
+            grad_output.contiguous()
+        )
 
         return grad_Q, grad_K, grad_bias
 
@@ -92,7 +97,7 @@ def profile_implementation(name, function, Q, K, bias):
 # Example usage:
 if __name__ == "__main__":
     # Sample data
-    B, T, C = 32, 128, 256  # Batch, Time, Channels
+    B, T, C = 6, 6, 6  # Batch, Time, Channels
     bias_size = 4
     Q = torch.randn(B, T, C, device='cuda', requires_grad=True)
     K = torch.randn(B, T, C, device='cuda', requires_grad=True)
