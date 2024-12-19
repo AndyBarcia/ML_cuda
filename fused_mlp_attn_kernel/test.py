@@ -86,7 +86,6 @@ def profile_implementation(name, function, Q, K, bias):
 
     # Print the results
     print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
-    prof.export_chrome_trace(f"{name}_trace.json")
 
     return output
 
