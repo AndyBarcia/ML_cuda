@@ -1,1 +1,1 @@
-from attention import AttentionMLP, ActivationType
+from .attention import AttentionMLP, ActivationType
