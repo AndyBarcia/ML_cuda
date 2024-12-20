@@ -5,24 +5,26 @@ from torch.autograd import Function
 import attention_mlp 
 
 class AttentionMLP_Autograd(nn.Module):
-    def forward(self, Q, K, bias):
+    def forward(self, Q, K, bias, mask):
         # einsum('b i c, b j c -> b i j c', Q, K) + bias
         attention_logits = torch.einsum('bic,bjc->bijc', Q, K) + bias
 
         # F.sigmoid(attention_logits).mean(dim=-2)
         attention_probs = F.sigmoid(attention_logits)
-        output = attention_probs.mean(dim=-2)
+        # Masked mean
+        masked_attention_probs = attention_probs * mask.unsqueeze(-1)
+        output = masked_attention_probs.sum(dim=-2) / mask.sum(dim=-1, keepdim=True)
 
         # Normal dot-product between all pairs of queries and keys
-        attention_logits = torch.einsum('bic,bjc->bij', Q, K)
+        attention_logits = torch.einsum('bic,bjc,bij->bij', Q, K, mask)
 
         return output, attention_logits
 
 class AttentionMLP(Function):
     @staticmethod
-    def forward(ctx, Q, K, bias):
+    def forward(ctx, Q, K, bias, mask):
         # Save for backward
-        ctx.save_for_backward(Q, K, bias)
+        ctx.save_for_backward(Q, K, bias, mask)
         ctx.bias_shape = bias.shape
 
         # einsum('b i c, b j c -> b i j c', Q, K) + bias
@@ -30,24 +32,28 @@ class AttentionMLP(Function):
 
         # F.sigmoid(attention_logits).mean(dim=-2)
         attention_probs = F.sigmoid(attention_logits)
-        output = attention_probs.mean(dim=-2)
+        # Masked mean
+        masked_attention_probs = attention_probs * mask.unsqueeze(-1)
+        output = masked_attention_probs.sum(dim=-2) / mask.sum(dim=-1, keepdim=True)
 
         # Normal dot-product between all pairs of queries and keys
-        attention_logits = torch.einsum('bic,bjc->bij', Q, K)
+        attention_logits = torch.einsum('bic,bjc,bij->bij', Q, K, mask)
 
         return output, attention_logits
 
     @staticmethod
     def backward(ctx, grad_output, grad_attention_logits):
         # Retrieve saved tensors
-        Q, K, bias = ctx.saved_tensors
+        Q, K, bias, mask = ctx.saved_tensors
+        bias_shape = ctx.bias_shape
 
         # Recompute forward pass intermediates
         attention_logits_with_bias = torch.einsum('bic,bjc->bijc', Q, K) + bias
         attention_probs = F.sigmoid(attention_logits_with_bias)
 
-        # Backward of mean(dim=-2) for output
-        grad_attention_probs = grad_output.unsqueeze(-2) / Q.shape[-2]  # Divide by T
+        # Backward of masked mean for output
+        grad_masked_attention_probs = grad_output.unsqueeze(-2) / mask.sum(dim=-1, keepdim=True).unsqueeze(-1)
+        grad_attention_probs = grad_masked_attention_probs * mask.unsqueeze(-1)
 
         # Backward of sigmoid for output
         grad_attention_logits_from_output = grad_attention_probs * attention_probs * (1 - attention_probs)
@@ -59,21 +65,21 @@ class AttentionMLP(Function):
         grad_Q_from_output = torch.einsum('bjc,bijc->bic', K, grad_attention_logits_from_output)
         grad_K_from_output = torch.einsum('bic,bijc->bjc', Q, grad_attention_logits_from_output)
 
-        # Backward of einsum for attention_logits
-        grad_Q_from_logits = torch.einsum('bjc,bij->bic', K, grad_attention_logits)
-        grad_K_from_logits = torch.einsum('bic,bij->bjc', Q, grad_attention_logits)
+        # Backward of einsum for attention_logits (masked)
+        grad_Q_from_logits = torch.einsum('bjc,bij->bic', K, grad_attention_logits * mask)
+        grad_K_from_logits = torch.einsum('bic,bij->bjc', Q, grad_attention_logits * mask)
 
         # Combine gradients
         grad_Q = grad_Q_from_output + grad_Q_from_logits
         grad_K = grad_K_from_output + grad_K_from_logits
 
-        return grad_Q, grad_K, grad_bias
+        return grad_Q, grad_K, grad_bias, None  # No gradient for the mask
 
 class AttentionMLP_CUDA(Function):
     @staticmethod
-    def forward(ctx, Q, K, bias, activation_type=0):
+    def forward(ctx, Q, K, bias, mask, activation_type=0):
         # Save tensors for backward pass
-        ctx.save_for_backward(Q, K, bias)
+        ctx.save_for_backward(Q, K, bias, mask)
         ctx.bias_shape = bias.shape
         ctx.activation_type = activation_type
 
@@ -90,7 +96,7 @@ class AttentionMLP_CUDA(Function):
     @staticmethod
     def backward(ctx, grad_output, grad_attention_logits):
         # Retrieve saved tensors
-        Q, K, bias = ctx.saved_tensors
+        Q, K, bias, mask = ctx.saved_tensors
         activation_type = ctx.activation_type
 
         # Call the CUDA kernel for the backward pass
@@ -103,9 +109,9 @@ class AttentionMLP_CUDA(Function):
             activation_type
         )
 
-        return grad_Q, grad_K, grad_bias
+        return grad_Q, grad_K, grad_bias, None
 
-def profile_implementation(name, function, Q, K, bias):
+def profile_implementation(name, function, Q, K, bias, mask):
     print(f"\nProfiling {name} Implementation:")
     with torch.profiler.profile(
         activities=[
@@ -115,7 +121,7 @@ def profile_implementation(name, function, Q, K, bias):
         record_shapes=True,
         profile_memory=True,  # Enables memory tracking
     ) as prof:
-        output, attn_logits = function(Q, K, bias)
+        output, attn_logits = function(Q, K, bias, mask)
         if attn_logits is not None:
             (output.sum() + attn_logits.sum()).backward()
         else:
@@ -129,15 +135,16 @@ def profile_implementation(name, function, Q, K, bias):
 # Example usage:
 if __name__ == "__main__":
     # Sample data
-    B, T, C = 32, 128, 512  # Batch, Time, Channels
+    B, T, C = 8, 8, 8  # Batch, Time, Channels
     Q = torch.randn(B, T, C, device='cuda', requires_grad=True)
     K = torch.randn(B, T, C, device='cuda', requires_grad=True)
     bias = torch.randn(T, C, device='cuda', requires_grad=True)
+    mask = torch.randn(B, T, T, device='cuda')
 
     # Perform the CUDA forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias)
+    output_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias, mask)
     cuda_allocated = torch.cuda.memory_allocated()
     cuda_reserved = torch.cuda.memory_reserved()
     print(f"CUDA Implementation: Allocated={cuda_allocated}, Reserved={cuda_reserved}")
@@ -150,7 +157,7 @@ if __name__ == "__main__":
     # Perform the PyTorch forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_pytorch = profile_implementation("PyTorch", AttentionMLP.apply, Q, K, bias)
+    output_pytorch = profile_implementation("PyTorch", AttentionMLP.apply, Q, K, bias, mask)
     pytorch_allocated = torch.cuda.memory_allocated()
     pytorch_reserved = torch.cuda.memory_reserved()
     print(f"PyTorch Implementation: Allocated={pytorch_allocated}, Reserved={pytorch_reserved}")
@@ -173,7 +180,7 @@ if __name__ == "__main__":
     # Perform the PyTorch Autograd backward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_pytorch_auto = profile_implementation("PyTorch Auto", AttentionMLP_Autograd(), Q, K, bias)
+    output_pytorch_auto = profile_implementation("PyTorch Auto", AttentionMLP_Autograd(), Q, K, bias, mask)
     pytorch_allocated = torch.cuda.memory_allocated()
     pytorch_reserved = torch.cuda.memory_reserved()
     print(f"PyTorch AutoGrad Implementation: Allocated={pytorch_allocated}, Reserved={pytorch_reserved}")
