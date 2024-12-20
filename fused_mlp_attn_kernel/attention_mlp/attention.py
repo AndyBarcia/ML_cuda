@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.autograd import Function
 import attention_mlp_cuda 
 import enum
+from typing import Optional
 
 
 class AttentionMLP_CUDA(Function):
@@ -86,7 +87,12 @@ class AttentionMLP(nn.Module):
             nn.Linear(embedding_dim, embedding_dim)
         )
 
-    def forward(self, q, k, mask):
+    def forward(
+        self, 
+        q: torch.Tensor, 
+        k: torch.Tensor, 
+        mask: Optional[torch.Tensor]=None
+    ):
         """
         Args:
             Q: Tensor of shape (B, T, C)
@@ -99,6 +105,13 @@ class AttentionMLP(nn.Module):
 
         Q = self.W_q(q) # (B, T_x, D)
         K = self.W_k(k) # (B, T_y, D)
+
+        if mask is None:
+            mask = torch.ones(
+                q.shape[0], q.shape[1], k.shape[1],
+                device = q.device,
+                dtype = q.dtype
+            ) # (B, T_x, T_y)
 
         output, attention_logits = AttentionMLP_CUDA.apply(
             Q, 
