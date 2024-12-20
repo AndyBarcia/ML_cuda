@@ -5,6 +5,7 @@ from torch.autograd import Function
 import attention_mlp_cuda 
 import enum
 from typing import Optional
+import math
 
 
 class AttentionMLP_CUDA(Function):
@@ -74,10 +75,11 @@ class AttentionMLP(nn.Module):
         k_dim=None,
         activation_type: ActivationType = ActivationType.SIGMOID,
         dropout=0.1,
-        dtype=torch.float32
+        dtype=torch.float32,
+        learned_scale=False
     ):
         super(AttentionMLP, self).__init__()
-
+        self.embedding_dim = embedding_dim
         self.activation_type = activation_type
         self.activation_type_i = activation_type.to_int()
 
@@ -89,6 +91,10 @@ class AttentionMLP(nn.Module):
             nn.Dropout(p=dropout),
             nn.Linear(embedding_dim, embedding_dim if q_dim is None else q_dim)
         )
+
+        self.scale = 1/math.sqrt(self.embedding_dim)
+        if learned_scale:
+            self.scale = torch.nn.Parameter(torch.tensor(self.scale))
 
     def forward(
         self, 
@@ -125,6 +131,8 @@ class AttentionMLP(nn.Module):
         ) # (B, T_x, D), (B, T_x, T_y)
 
         output = self.W_v(output) # (B, T_x, D)
+
+        attention_logits = attention_logits * self.scale
 
         # Call the custom CUDA autograd function
         return output, attention_logits
