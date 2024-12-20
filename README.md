@@ -3,10 +3,13 @@
 Insall with
 
 ```
-sudo pip install fused_mlp_attn_kernel
+tmp_dir=$(mktemp -d)
+git clone https://github.com/AndyBarcia/ML_cuda.git "$tmp_dir"
+sudo pip install "$tmp_dir/fused_mlp_attn_kernel"
+rm -rf "$tmp_dir"
 ```
 
 ## TODO
 
-- Support masking (important)
 - Support query-key bias.
+- Optimize. Currently implementation is naive
