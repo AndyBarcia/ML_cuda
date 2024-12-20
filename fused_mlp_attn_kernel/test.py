@@ -88,6 +88,7 @@ class AttentionMLP_CUDA(Function):
             Q.contiguous(), 
             K.contiguous(), 
             bias.contiguous(),
+            mask.contiguous(),
             activation_type
         )
 
@@ -101,9 +102,10 @@ class AttentionMLP_CUDA(Function):
 
         # Call the CUDA kernel for the backward pass
         grad_Q, grad_K, grad_bias = attention_mlp.attention_mlp_backward_cuda(
-            Q.contiguous(), 
-            K.contiguous(), 
-            bias.contiguous(), 
+            Q.contiguous(),
+            K.contiguous(),
+            bias.contiguous(),
+            mask.contiguous(),
             grad_output.contiguous(),
             grad_attention_logits.contiguous(),
             activation_type
@@ -135,11 +137,11 @@ def profile_implementation(name, function, Q, K, bias, mask):
 # Example usage:
 if __name__ == "__main__":
     # Sample data
-    B, T, C = 8, 8, 8  # Batch, Time, Channels
-    Q = torch.randn(B, T, C, device='cuda', requires_grad=True)
-    K = torch.randn(B, T, C, device='cuda', requires_grad=True)
-    bias = torch.randn(T, C, device='cuda', requires_grad=True)
-    mask = torch.randn(B, T, T, device='cuda')
+    B, T, C = 32, 32, 512  # Batch, Time, Channels
+    Q = torch.randn(B, T, C, device='cuda', requires_grad=True, dtype=torch.float64)
+    K = torch.randn(B, T, C, device='cuda', requires_grad=True, dtype=torch.float64)
+    bias = torch.randn(T, C, device='cuda', requires_grad=True, dtype=torch.float64)
+    mask = torch.randn(B, T, T, device='cuda', dtype=torch.float64)
 
     # Perform the CUDA forward pass
     torch.cuda.empty_cache()
