@@ -73,7 +73,8 @@ class AttentionMLP(nn.Module):
         q_dim=None,
         k_dim=None,
         activation_type: ActivationType = ActivationType.SIGMOID,
-        dropout=0.1
+        dropout=0.1,
+        dtype=torch.float32
     ):
         super(AttentionMLP, self).__init__()
 
@@ -82,7 +83,7 @@ class AttentionMLP(nn.Module):
 
         self.W_q = nn.Linear(embedding_dim if q_dim is None else q_dim, embedding_dim)
         self.W_k = nn.Linear(embedding_dim if k_dim is None else k_dim , embedding_dim)
-        self.bias = nn.Parameter(torch.randn(embedding_dim))
+        self.bias = nn.Parameter(torch.randn(embedding_dim, dtype=dtype))
 
         self.W_v = nn.Sequential(
             nn.Dropout(p=dropout),
@@ -118,8 +119,8 @@ class AttentionMLP(nn.Module):
         output, attention_logits = AttentionMLP_CUDA.apply(
             Q, 
             K, 
-            self.bias, 
-            mask, 
+            self.bias.to(Q.dtype), 
+            mask.to(Q.dtype), 
             self.activation_type_i
         ) # (B, T_x, D), (B, T_x, T_y)
 
