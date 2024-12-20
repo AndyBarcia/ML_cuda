@@ -11,5 +11,6 @@ rm -rf "$tmp_dir"
 
 ## TODO
 
+- Dropout
 - Support query-key bias.
 - Optimize. Currently implementation is naive
