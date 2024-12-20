@@ -132,21 +132,21 @@ def profile_implementation(name, function, Q, K, bias, mask):
     # Print the results
     print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
 
-    return output
+    return output, attn_logits
 
 # Example usage:
 if __name__ == "__main__":
     # Sample data
-    B, T, C = 32, 32, 512  # Batch, Time, Channels
-    Q = torch.randn(B, T, C, device='cuda', requires_grad=True, dtype=torch.float64)
-    K = torch.randn(B, T, C, device='cuda', requires_grad=True, dtype=torch.float64)
-    bias = torch.randn(T, C, device='cuda', requires_grad=True, dtype=torch.float64)
-    mask = torch.randn(B, T, T, device='cuda', dtype=torch.float64)
+    B, T1, T2, C = 32, 32, 24, 512  # Batch, Time, Channels
+    Q = torch.randn(B, T1, C, device='cuda', requires_grad=True, dtype=torch.float64)
+    K = torch.randn(B, T2, C, device='cuda', requires_grad=True, dtype=torch.float64)
+    bias = torch.randn(C, device='cuda', requires_grad=True, dtype=torch.float64)
+    mask = torch.randn(B, T1, T2, device='cuda', dtype=torch.float64)
 
     # Perform the CUDA forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias, mask)
+    output_cuda, attn_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias, mask)
     cuda_allocated = torch.cuda.memory_allocated()
     cuda_reserved = torch.cuda.memory_reserved()
     print(f"CUDA Implementation: Allocated={cuda_allocated}, Reserved={cuda_reserved}")
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     # Perform the PyTorch forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_pytorch = profile_implementation("PyTorch", AttentionMLP.apply, Q, K, bias, mask)
+    output_pytorch, attn_pytorch = profile_implementation("PyTorch", AttentionMLP.apply, Q, K, bias, mask)
     pytorch_allocated = torch.cuda.memory_allocated()
     pytorch_reserved = torch.cuda.memory_reserved()
     print(f"PyTorch Implementation: Allocated={pytorch_allocated}, Reserved={pytorch_reserved}")
@@ -170,10 +170,12 @@ if __name__ == "__main__":
     Q.grad, K.grad, bias.grad = None, None, None
 
     print("Output close:", torch.allclose(output_cuda, output_pytorch))
+    print("Attn close:", torch.allclose(attn_cuda, attn_pytorch))
     print("Q grads close:", torch.allclose(Q_grad_cuda, Q_grad_pytorch))
     print("K grads close:", torch.allclose(K_grad_cuda, K_grad_pytorch))
     print("Bias grads close:", torch.allclose(bias_grad_cuda, bias_grad_pytorch))
 
+    print("(attn_cuda-attn_pytorch).abs().max()", (attn_cuda-attn_pytorch).abs().max())
     print("(output_cuda-output_pytorch).abs().max()", (output_cuda-output_pytorch).abs().max())
     print("(Q_grad_cuda-Q_grad_pytorch).abs().max()", (Q_grad_cuda-Q_grad_pytorch).abs().max())
     print("(K_grad_cuda-K_grad_pytorch).abs().max()", (K_grad_cuda-K_grad_pytorch).abs().max())
@@ -182,7 +184,7 @@ if __name__ == "__main__":
     # Perform the PyTorch Autograd backward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_pytorch_auto = profile_implementation("PyTorch Auto", AttentionMLP_Autograd(), Q, K, bias, mask)
+    output_pytorch_auto, attn_pytorch_auto = profile_implementation("PyTorch Auto", AttentionMLP_Autograd(), Q, K, bias, mask)
     pytorch_allocated = torch.cuda.memory_allocated()
     pytorch_reserved = torch.cuda.memory_reserved()
     print(f"PyTorch AutoGrad Implementation: Allocated={pytorch_allocated}, Reserved={pytorch_reserved}")
@@ -193,10 +195,12 @@ if __name__ == "__main__":
     Q.grad, K.grad, bias.grad = None, None, None
 
     print("Output close:", torch.allclose(output_cuda, output_pytorch_auto))
+    print("Attn close:", torch.allclose(attn_cuda, attn_pytorch_auto))
     print("Q grads close:", torch.allclose(Q_grad_cuda, Q_grad_pytorch_auto))
     print("K grads close:", torch.allclose(K_grad_cuda, K_grad_pytorch_auto))
     print("Bias grads close:", torch.allclose(bias_grad_cuda, bias_grad_pytorch_auto))
 
+    print("(attn_cuda-attn_pytorch_auto).abs().max()", (attn_cuda-attn_pytorch_auto).abs().max())
     print("(output_cuda-output_pytorch_auto).abs().max()", (output_cuda-output_pytorch_auto).abs().max())
     print("(Q_grad_cuda-Q_grad_pytorch_auto).abs().max()", (Q_grad_cuda-Q_grad_pytorch_auto).abs().max())
     print("(K_grad_cuda-K_grad_pytorch_auto).abs().max()", (K_grad_cuda-K_grad_pytorch_auto).abs().max())
