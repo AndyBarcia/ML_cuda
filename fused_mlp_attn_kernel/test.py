@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.autograd import Function
-import attention_mlp 
+from attention_mlp.attention import AttentionMLP_CUDA, ActivationType
 
 class AttentionMLP_Autograd(nn.Module):
     def forward(self, Q, K, bias, mask):
@@ -20,7 +20,7 @@ class AttentionMLP_Autograd(nn.Module):
 
         return output, attention_logits
 
-class AttentionMLP(Function):
+class AttentionMLP_PyTorch(Function):
     @staticmethod
     def forward(ctx, Q, K, bias, mask):
         # Save for backward
@@ -75,45 +75,7 @@ class AttentionMLP(Function):
 
         return grad_Q, grad_K, grad_bias, None  # No gradient for the mask
 
-class AttentionMLP_CUDA(Function):
-    @staticmethod
-    def forward(ctx, Q, K, bias, mask, activation_type=0):
-        # Save tensors for backward pass
-        ctx.save_for_backward(Q, K, bias, mask)
-        ctx.bias_shape = bias.shape
-        ctx.activation_type = activation_type
-
-        # Call the CUDA kernel for the forward pass
-        output, attention_logits = attention_mlp.attention_mlp_forward_cuda(
-            Q.contiguous(), 
-            K.contiguous(), 
-            bias.contiguous(),
-            mask.contiguous(),
-            activation_type
-        )
-
-        return output, attention_logits
-
-    @staticmethod
-    def backward(ctx, grad_output, grad_attention_logits):
-        # Retrieve saved tensors
-        Q, K, bias, mask = ctx.saved_tensors
-        activation_type = ctx.activation_type
-
-        # Call the CUDA kernel for the backward pass
-        grad_Q, grad_K, grad_bias = attention_mlp.attention_mlp_backward_cuda(
-            Q.contiguous(),
-            K.contiguous(),
-            bias.contiguous(),
-            mask.contiguous(),
-            grad_output.contiguous(),
-            grad_attention_logits.contiguous(),
-            activation_type
-        )
-
-        return grad_Q, grad_K, grad_bias, None
-
-def profile_implementation(name, function, Q, K, bias, mask):
+def profile_implementation(name, function, Q, K, bias, mask, *args):
     print(f"\nProfiling {name} Implementation:")
     with torch.profiler.profile(
         activities=[
@@ -123,7 +85,7 @@ def profile_implementation(name, function, Q, K, bias, mask):
         record_shapes=True,
         profile_memory=True,  # Enables memory tracking
     ) as prof:
-        output, attn_logits = function(Q, K, bias, mask)
+        output, attn_logits = function(Q, K, bias, mask, *args)
         if attn_logits is not None:
             (output.sum() + attn_logits.sum()).backward()
         else:
@@ -146,7 +108,7 @@ if __name__ == "__main__":
     # Perform the CUDA forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_cuda, attn_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias, mask)
+    output_cuda, attn_cuda = profile_implementation("CUDA", AttentionMLP_CUDA.apply, Q, K, bias, mask, ActivationType.SIGMOID.to_int())
     cuda_allocated = torch.cuda.memory_allocated()
     cuda_reserved = torch.cuda.memory_reserved()
     print(f"CUDA Implementation: Allocated={cuda_allocated}, Reserved={cuda_reserved}")
@@ -159,7 +121,7 @@ if __name__ == "__main__":
     # Perform the PyTorch forward pass
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
-    output_pytorch, attn_pytorch = profile_implementation("PyTorch", AttentionMLP.apply, Q, K, bias, mask)
+    output_pytorch, attn_pytorch = profile_implementation("PyTorch", AttentionMLP_PyTorch.apply, Q, K, bias, mask)
     pytorch_allocated = torch.cuda.memory_allocated()
     pytorch_reserved = torch.cuda.memory_reserved()
     print(f"PyTorch Implementation: Allocated={pytorch_allocated}, Reserved={pytorch_reserved}")
