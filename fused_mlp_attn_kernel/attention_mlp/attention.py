@@ -68,8 +68,10 @@ class ActivationType(enum.Enum):
 
 class AttentionMLP(nn.Module):
     def __init__(
-        self, 
-        embedding_dim, 
+        self,
+        embedding_dim,
+        q_dim=None,
+        k_dim=None,
         activation_type: ActivationType = ActivationType.SIGMOID,
         dropout=0.1
     ):
@@ -78,13 +80,13 @@ class AttentionMLP(nn.Module):
         self.activation_type = activation_type
         self.activation_type_i = activation_type.to_int()
 
-        self.W_q = nn.Linear(embedding_dim, embedding_dim)
-        self.W_k = nn.Linear(embedding_dim, embedding_dim)
+        self.W_q = nn.Linear(embedding_dim if q_dim is None else q_dim, embedding_dim)
+        self.W_k = nn.Linear(embedding_dim if k_dim is None else k_dim , embedding_dim)
         self.bias = nn.Parameter(torch.randn(embedding_dim))
 
         self.W_v = nn.Sequential(
             nn.Dropout(p=dropout),
-            nn.Linear(embedding_dim, embedding_dim)
+            nn.Linear(embedding_dim, embedding_dim if q_dim is None else q_dim)
         )
 
     def forward(
