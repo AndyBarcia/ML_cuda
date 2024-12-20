@@ -68,15 +68,25 @@ class ActivationType(enum.Enum):
 class AttentionMLP(nn.Module):
     def __init__(
         self, 
-        bias_size, 
-        activation_type: ActivationType = ActivationType.SIGMOID
+        embedding_dim, 
+        activation_type: ActivationType = ActivationType.SIGMOID,
+        dropout=0.1
     ):
         super(AttentionMLP, self).__init__()
-        self.bias = nn.Parameter(torch.randn(bias_size))
+
         self.activation_type = activation_type
         self.activation_type_i = activation_type.to_int()
 
-    def forward(self, Q, K, mask):
+        self.W_q = nn.Linear(embedding_dim, embedding_dim)
+        self.W_k = nn.Linear(embedding_dim, embedding_dim)
+        self.bias = nn.Parameter(torch.randn(embedding_dim))
+
+        self.W_v = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(embedding_dim, embedding_dim)
+        )
+
+    def forward(self, q, k, mask):
         """
         Args:
             Q: Tensor of shape (B, T, C)
@@ -87,5 +97,18 @@ class AttentionMLP(nn.Module):
             attention_logits: Tensor of shape (B, T, T)
         """
 
+        Q = self.W_q(q) # (B, T_x, D)
+        K = self.W_k(k) # (B, T_y, D)
+
+        output, attention_logits = AttentionMLP_CUDA.apply(
+            Q, 
+            K, 
+            self.bias, 
+            mask, 
+            self.activation_type_i
+        ) # (B, T_x, D), (B, T_x, T_y)
+
+        output = self.W_v(output) # (B, T_x, D)
+
         # Call the custom CUDA autograd function
-        return AttentionMLP_CUDA.apply(Q, K, self.bias, mask, self.activation_type_i)
+        return output, attention_logits
