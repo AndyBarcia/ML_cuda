@@ -1,20 +1,24 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include "activation_func.h"
 
 // CUDA kernel for custom attention forward pass
-template <typename scalar_t>
+template <int activation_type, typename scalar_t>
 __global__ void attention_mlp_forward_kernel(
     const scalar_t* __restrict__ Q,
     const scalar_t* __restrict__ K,
     const scalar_t* __restrict__ bias,
     scalar_t* __restrict__ output,
+    scalar_t* __restrict__ attention_logits,
     int B, int T, int C,
     int bias_size
 ) {
     int b = blockIdx.x;
     int i = blockIdx.y;
     int c = threadIdx.x;
+
+    __shared__ scalar_t shared_mem[1024];
 
     if (b >= B || i >= T || c >= C) return;
 
@@ -24,24 +28,44 @@ __global__ void attention_mlp_forward_kernel(
         scalar_t k_val = K[b * T * C + j * C + c];
         scalar_t bias_val = bias[j * bias_size + c];
 
-        // Element-wise product plus bias.
-        scalar_t logit = q_val * k_val + bias_val;
-        // Sigmoid.
-        // TODO optionally allow ReLU and Tahn.
-        scalar_t prob = 1.0 / (1.0 + exp(-logit));
+        // Element-wise product
+        scalar_t product = q_val * k_val;
+        // Add bias.
+        scalar_t logit = product + bias_val;
+        // Apply activation function (sigmoid, ReLU, etc).
+        scalar_t prob = activation_func<activation_type, scalar_t>(logit);
         // Reduce channel dimension.
         sum += prob;
+
+        // Reduce across threads within the block for attention_logits
+        int thread_idx = threadIdx.x;
+        shared_mem[thread_idx] = product;
+        __syncthreads();
+
+        // Parallel reduction within the block
+        for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+            if (thread_idx < stride) {
+                shared_mem[thread_idx] += shared_mem[thread_idx + stride];
+            }
+            __syncthreads();
+        }
+
+        // Only thread 0 writes the reduced sum to attention_logits
+        if (thread_idx == 0) {
+            atomicAdd(&attention_logits[b * T * T + i * T + j], shared_mem[0]);
+        }
     }
     output[b * T * C + i * C + c] = sum / T;
 }
 
 // CUDA kernel for custom attention backward pass
-template <typename scalar_t>
+template <int activation_type, typename scalar_t>
 __global__ void attention_mlp_backward_kernel(
     const scalar_t* __restrict__ Q,
     const scalar_t* __restrict__ K,
     const scalar_t* __restrict__ bias,
     const scalar_t* __restrict__ grad_output,
+    const scalar_t* __restrict__ grad_attention_logits,
     scalar_t* __restrict__ grad_Q,
     scalar_t* __restrict__ grad_K,
     scalar_t* __restrict__ grad_bias,
@@ -61,26 +85,30 @@ __global__ void attention_mlp_backward_kernel(
         scalar_t k_val = K[b * T * C + j * C + c];
         scalar_t bias_val = bias[j * bias_size + c];
 
-        // Recompute logit and prob from forward pass
+        // Recompute logit from forward pass
         scalar_t logit = q_val * k_val + bias_val;
-        scalar_t prob = 1.0 / (1.0 + exp(-logit));
 
-        // Gradient of sigmoid
-        scalar_t grad_logit = grad_out_val * prob * (1.0 - prob);
+        // Gradient of activation function
+        scalar_t grad_logit = grad_out_val * activation_derivative<activation_type, scalar_t>(logit);
 
         // Gradient of bias (accumulate across i dimension)
         atomicAdd(&grad_bias[j * bias_size + c], grad_logit);
 
         // Gradient of Q (accumulate across j dimension)
-        atomicAdd(&grad_Q[b * T * C + i * C + c], grad_logit * k_val);
+        scalar_t grad_q_val = grad_logit * k_val;
+        grad_q_val += grad_attention_logits[b * T * T + i * T + j] * k_val;
+        atomicAdd(&grad_Q[b * T * C + i * C + c], grad_q_val);
 
         // Gradient of K (accumulate across i dimension)
-        atomicAdd(&grad_K[b * T * C + j * C + c], grad_logit * q_val);
+        scalar_t grad_k_val = grad_logit * q_val;
+        grad_k_val += grad_attention_logits[b * T * T + i * T + j] * q_val;
+        atomicAdd(&grad_K[b * T * C + j * C + c], grad_k_val);
     }
 }
 
 // Wrapper function for calling the forward kernel
-torch::Tensor attention_mlp_forward_cuda(
+template <int activation_type>
+std::vector<torch::Tensor> attention_mlp_forward_cuda_template(
     torch::Tensor Q,
     torch::Tensor K,
     torch::Tensor bias
@@ -91,29 +119,52 @@ torch::Tensor attention_mlp_forward_cuda(
     int bias_size = bias.size(1);
 
     torch::Tensor output = torch::zeros({B, T, C}, Q.options());
+    torch::Tensor attention_logits = torch::zeros({B, T, T}, Q.options());
 
     dim3 dimGrid(B, T);
     dim3 dimBlock(C);
 
     AT_DISPATCH_FLOATING_TYPES(Q.type(), "attention_mlp_forward_kernel", ([&] {
-        attention_mlp_forward_kernel<scalar_t><<<dimGrid, dimBlock>>>(
+        attention_mlp_forward_kernel<activation_type, scalar_t><<<dimGrid, dimBlock>>>(
             Q.data_ptr<scalar_t>(),
             K.data_ptr<scalar_t>(),
             bias.data_ptr<scalar_t>(),
             output.data_ptr<scalar_t>(),
+            attention_logits.data_ptr<scalar_t>(),
             B, T, C, bias_size
         );
     }));
 
-    return output;
+    return {output, attention_logits};
 }
 
-// Wrapper function for calling the backward kernel
-std::vector<torch::Tensor> attention_mlp_backward_cuda(
+// Call the appropiate template function based on the activation type.
+std::vector<torch::Tensor> attention_mlp_forward_cuda(
     torch::Tensor Q,
     torch::Tensor K,
     torch::Tensor bias,
-    torch::Tensor grad_output
+    int activation_type
+) {
+    if (activation_type == SIGMOID) {
+        return attention_mlp_forward_cuda_template<SIGMOID>(Q, K, bias);
+    } else if (activation_type == RELU) {
+        return attention_mlp_forward_cuda_template<RELU>(Q, K, bias);
+    } else if (activation_type == TANH) {
+        return attention_mlp_forward_cuda_template<TANH>(Q, K, bias);
+    } else {
+        // Handle invalid activation type
+        return attention_mlp_forward_cuda_template<SIGMOID>(Q, K, bias);
+    }
+}
+
+// Wrapper function for calling the backward kernel
+template <int activation_type>
+std::vector<torch::Tensor> attention_mlp_backward_cuda_template(
+    torch::Tensor Q,
+    torch::Tensor K,
+    torch::Tensor bias,
+    torch::Tensor grad_output,
+    torch::Tensor grad_attention_logits
 ) {
     int B = Q.size(0);
     int T = Q.size(1);
@@ -128,11 +179,12 @@ std::vector<torch::Tensor> attention_mlp_backward_cuda(
     dim3 dimBlock(C);
 
     AT_DISPATCH_FLOATING_TYPES(Q.type(), "attention_mlp_backward_kernel", ([&] {
-        attention_mlp_backward_kernel<scalar_t><<<dimGrid, dimBlock>>>(
+        attention_mlp_backward_kernel<activation_type, scalar_t><<<dimGrid, dimBlock>>>(
             Q.data_ptr<scalar_t>(),
             K.data_ptr<scalar_t>(),
             bias.data_ptr<scalar_t>(),
             grad_output.data_ptr<scalar_t>(),
+            grad_attention_logits.data_ptr<scalar_t>(),
             grad_Q.data_ptr<scalar_t>(),
             grad_K.data_ptr<scalar_t>(),
             grad_bias.data_ptr<scalar_t>(),
@@ -141,6 +193,27 @@ std::vector<torch::Tensor> attention_mlp_backward_cuda(
     }));
 
     return {grad_Q, grad_K, grad_bias};
+}
+
+// Call the appropiate template function based on the activation type.
+std::vector<torch::Tensor> attention_mlp_backward_cuda(
+    torch::Tensor Q,
+    torch::Tensor K,
+    torch::Tensor bias,
+    torch::Tensor grad_output,
+    torch::Tensor grad_attention_logits,
+    int activation_type
+) {
+    if (activation_type == SIGMOID) {
+        return attention_mlp_backward_cuda_template<SIGMOID>(Q, K, bias, grad_output, grad_attention_logits);
+    } else if (activation_type == RELU) {
+        return attention_mlp_backward_cuda_template<RELU>(Q, K, bias, grad_output, grad_attention_logits);
+    } else if (activation_type == TANH) {
+        return attention_mlp_backward_cuda_template<TANH>(Q, K, bias, grad_output, grad_attention_logits);
+    } else {
+        // Handle invalid activation type (maybe raise an error)
+        return attention_mlp_backward_cuda_template<SIGMOID>(Q, K, bias, grad_output, grad_attention_logits);
+    }
 }
 
 // PYBIND11 module definition

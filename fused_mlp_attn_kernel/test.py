@@ -5,7 +5,6 @@ from torch.autograd import Function
 import attention_mlp 
 
 class AttentionMLP_Autograd(nn.Module):
-    @torch.compile(mode="reduce-overhead")
     def forward(self, Q, K, bias):
         # einsum('b i c, b j c -> b i j c', Q, K) + bias
         attention_logits = torch.einsum('bic,bjc->bijc', Q, K) + bias
@@ -21,7 +20,6 @@ class AttentionMLP_Autograd(nn.Module):
 
 class AttentionMLP(Function):
     @staticmethod
-    @torch.compile(mode="reduce-overhead")
     def forward(ctx, Q, K, bias):
         # Save for backward
         ctx.save_for_backward(Q, K, bias)
@@ -73,31 +71,36 @@ class AttentionMLP(Function):
 
 class AttentionMLP_CUDA(Function):
     @staticmethod
-    def forward(ctx, Q, K, bias):
+    def forward(ctx, Q, K, bias, activation_type=0):
         # Save tensors for backward pass
         ctx.save_for_backward(Q, K, bias)
         ctx.bias_shape = bias.shape
+        ctx.activation_type = activation_type
 
         # Call the CUDA kernel for the forward pass
-        output = attention_mlp.attention_mlp_forward_cuda(
+        output, attention_logits = attention_mlp.attention_mlp_forward_cuda(
             Q.contiguous(), 
             K.contiguous(), 
-            bias.contiguous()
+            bias.contiguous(),
+            activation_type
         )
 
-        return output, None
+        return output, attention_logits
 
     @staticmethod
     def backward(ctx, grad_output, grad_attention_logits):
         # Retrieve saved tensors
         Q, K, bias = ctx.saved_tensors
+        activation_type = ctx.activation_type
 
         # Call the CUDA kernel for the backward pass
         grad_Q, grad_K, grad_bias = attention_mlp.attention_mlp_backward_cuda(
             Q.contiguous(), 
             K.contiguous(), 
             bias.contiguous(), 
-            grad_output.contiguous()
+            grad_output.contiguous(),
+            grad_attention_logits.contiguous(),
+            activation_type
         )
 
         return grad_Q, grad_K, grad_bias
@@ -113,7 +116,10 @@ def profile_implementation(name, function, Q, K, bias):
         profile_memory=True,  # Enables memory tracking
     ) as prof:
         output, attn_logits = function(Q, K, bias)
-        output.sum().backward()
+        if attn_logits is not None:
+            (output.sum() + attn_logits.sum()).backward()
+        else:
+            output.sum().backward()
 
     # Print the results
     print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=10))
@@ -123,7 +129,7 @@ def profile_implementation(name, function, Q, K, bias):
 # Example usage:
 if __name__ == "__main__":
     # Sample data
-    B, T, C = 1, 4, 4  # Batch, Time, Channels
+    B, T, C = 32, 128, 512  # Batch, Time, Channels
     Q = torch.randn(B, T, C, device='cuda', requires_grad=True)
     K = torch.randn(B, T, C, device='cuda', requires_grad=True)
     bias = torch.randn(T, C, device='cuda', requires_grad=True)
