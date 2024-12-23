@@ -13,4 +13,5 @@ rm -rf "$tmp_dir"
 
 - Dropout
 - Support query-key bias.
+- Fix NaN output when mask is 0 for query.
 - Optimize. Currently implementation is naive
